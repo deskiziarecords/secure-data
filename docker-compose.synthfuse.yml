@@ -1,0 +1,158 @@
+version: '3.8'
+
+services:
+  # SynthFuse API Gateway
+  synthfuse-api:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.synthfuse-api
+    ports:
+      - "8082:8082"
+    environment:
+      - ENVIRONMENT=development
+      - DATABASE_URL=postgresql://postgres:password@postgres:5432/synthfuse
+      - REDIS_URL=redis://redis:6379/0
+      - GPU_ENABLED=${GPU_ENABLED:-false}
+    volumes:
+      - ./models:/app/models
+      - ./data:/app/data
+    depends_on:
+      - postgres
+      - redis
+    networks:
+      - synthfuse-network
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: ${GPU_COUNT:-1}
+              capabilities: [gpu]
+
+  # Synthetic Data Generator
+  synthetic-generator:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.synthetic-generator
+    environment:
+      - MODEL_PATH=/app/models/generators
+      - DATASET_PATH=/app/data/datasets
+      - GPU_ENABLED=${GPU_ENABLED:-false}
+    volumes:
+      - ./models/generators:/app/models/generators
+      - ./data/datasets:/app/data/datasets
+    depends_on:
+      - synthfuse-api
+    networks:
+      - synthfuse-network
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: ${GPU_COUNT:-1}
+              capabilities: [gpu]
+
+  # AI Fusion Engine
+  ai-fusion-engine:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.ai-fusion
+    environment:
+      - TRITON_SERVER_URL=triton:8000
+      - MODEL_CACHE_SIZE=1000
+    ports:
+      - "8083:8083"
+    depends_on:
+      - triton-server
+    networks:
+      - synthfuse-network
+
+  # NVIDIA Triton Inference Server
+  triton-server:
+    image: nvcr.io/nvidia/tritonserver:23.10-py3
+    command: tritonserver --model-repository=/models --strict-model-config=false
+    volumes:
+      - ./models/triton:/models
+    ports:
+      - "8000:8000"
+      - "8001:8001"
+      - "8002:8002"
+    networks:
+      - synthfuse-network
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: ${GPU_COUNT:-1}
+              capabilities: [gpu]
+
+  # PostgreSQL for metadata storage
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=password
+      - POSTGRES_DB=synthfuse
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./configs/synthfuse/init.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "5432:5432"
+    networks:
+      - synthfuse-network
+
+  # Redis for caching
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - synthfuse-network
+
+  # Monitoring Stack
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - ./monitoring/prometheus:/etc/prometheus
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=200h'
+      - '--web.enable-lifecycle'
+    ports:
+      - "9090:9090"
+    networks:
+      - synthfuse-network
+
+  grafana:
+    image: grafana/grafana:latest
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+    networks:
+      - synthfuse-network
+
+volumes:
+  postgres_data:
+  redis_data:
+  prometheus_data:
+  grafana_data:
+  model_data:
+
+networks:
+  synthfuse-network:
+    driver: bridge
